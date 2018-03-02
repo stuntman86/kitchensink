@@ -1,0 +1,141 @@
+#!groovy
+
+
+node('maven') {
+  
+  def mvnCmd = "mvn -s ./nexus_openshift_settings.xml"
+
+  stage('Checkout Source') {
+    // Get Source Code from SCM (Git) as configured in the Jenkins Project
+    // Next line for inline script, "checkout scm" for Jenkinsfile from Gogs
+    git 'http://gogs-george-gogs.apps.2245.openshift.opentlc.com/CICD-HOMEWORK/george-kitchensink'
+    sh("git config --global user.email 'georgetest+1@redhat.com'")
+    sh("git config --global user.name 'george'")
+    sh("git tag -a 7.0.'${currentBuild.number}' -m 'Jenkins'")
+    sh('git push http://george:george@gogs-george-gogs.apps.2245.openshift.opentlc.com/CICD-HOMEWORK/george-kitchensink.git --tags')
+    //checkout scm
+  }
+
+ 
+  def groupId    = getGroupIdFromPom("pom.xml")
+  def artifactId = getArtifactIdFromPom("pom.xml")
+  def version    = getBuildVersion("pom.xml")
+  
+
+  stage('Build') {
+    echo "Building version ${version}"
+    
+    sh "${mvnCmd} versions:set -f pom.xml -s nexus_settings.xml -DgenerateBackupPoms=false -DnewVersion=${version}"
+    sh "cat pom.xml"
+    sh "${mvnCmd} clean package -DskipTests"
+  }
+  stage('Unit Tests') {
+    echo "Unit Tests"
+    sh "${mvnCmd} test"
+  }
+  stage('Analyze the Code') {
+    echo "Code Analysis"
+
+  
+    sh "${mvnCmd} sonar:sonar -Dsonar.host.url=http://sonarqube-george-sonarqube.apps.2245.openshift.opentlc.com/ -Dsonar.projectName=${JOB_BASE_NAME}"
+  }
+  stage('Publish to Nexus') {
+    echo "Publish to Nexus"
+
+    sh "cat pom.xml"
+    sh "${mvnCmd} deploy -DskipTests=true -DaltDeploymentRepository=nexus::default::http://nexus3-george-nexus.apps.2245.openshift.opentlc.com/repository/releases"
+  }
+
+  stage('Build Image') {
+    def newTag = "TestingCandidate-${version}"
+    echo "New Tag: ${newTag}"
+
+    // Copy the war file we just built and rename to ROOT.war
+    sh "cp ./target/jboss-kitchensink-angularjs.war ./ROOT.war"
+
+    // Start Binary Build in OpenShift using the file just published
+    
+    sh "oc project george-kitchensink-dev"
+    sh "oc start-build tasks --follow --from-file=./ROOT.war -n george-kitchensink-dev"
+
+    openshiftTag alias: 'false', destStream: 'tasks', destTag: newTag, destinationNamespace: 'george-kitchensink-dev', namespace: 'george-kitchensink-dev', srcStream: 'tasks', srcTag: 'latest', verbose: 'false'
+  }
+
+  stage('Deploy to Dev') {
+    // Patch the DeploymentConfig so that it points to the latest TestingCandidate-${version} Image.
+
+    sh "oc project george-kitchensink-dev"
+    sh "oc patch dc tasks --patch '{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"tasks\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"george-kitchensink-dev\", \"name\": \"tasks:TestingCandidate-$version\"}}}]}}' -n george-kitchensink-dev"
+
+    openshiftDeploy depCfg: 'tasks', namespace: 'george-kitchensink-dev', verbose: 'false', waitTime: '', waitUnit: 'sec'
+    openshiftVerifyDeployment depCfg: 'tasks', namespace: 'george-kitchensink-dev', replicaCount: '1', verbose: 'false', verifyReplicaCount: 'false', waitTime: '', waitUnit: 'sec'
+    openshiftVerifyService namespace: 'george-kitchensink-dev', svcName: 'tasks', verbose: 'false'
+  }
+
+  stage('Integration Test') {
+    // TBD: Proper test
+    // Could use the OpenShift-Tasks REST APIs to make sure it is working as expected.
+
+    def newTag = "ProdReady-${version}"
+    echo "New Tag: ${newTag}"
+
+    
+    openshiftTag alias: 'false', destStream: 'tasks', destTag: newTag, destinationNamespace: 'george-kitchensink-dev', namespace: 'george-kitchensink-dev', srcStream: 'tasks', srcTag: 'latest', verbose: 'false'
+  }
+
+  // Blue/Green Deployment into Production
+  // -------------------------------------
+  def dest   = "tasks-green"
+  def active = ""
+
+  stage('Prep Production Deployment') {
+    
+    sh "oc project george-kitchensink-prod"
+    sh "oc get route tasks -n george-kitchensink-prod -o jsonpath='{ .spec.to.name }' > activesvc.txt"
+    active = readFile('activesvc.txt').trim()
+    if (active == "tasks-green") {
+      dest = "tasks-blue"
+    }
+    echo "Active svc: " + active
+    echo "Dest svc:   " + dest
+  }
+  stage('Deploy new Version') {
+    echo "Deploying to ${dest}"
+
+    // Patch the DeploymentConfig so that it points to
+    // the latest ProdReady-${version} Image.
+   
+    sh "oc patch dc ${dest} --patch '{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"$dest\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"george-kitchensink-dev\", \"name\": \"tasks:ProdReady-$version\"}}}]}}' -n george-kitchensink-prod"
+
+    openshiftDeploy depCfg: dest, namespace: 'george-kitchensink-prod', verbose: 'false', waitTime: '', waitUnit: 'sec'
+    openshiftVerifyDeployment depCfg: dest, namespace: 'george-kitchensink-prod', replicaCount: '1', verbose: 'false', verifyReplicaCount: 'true', waitTime: '', waitUnit: 'sec'
+    openshiftVerifyService namespace: 'george-kitchensink-prod', svcName: dest, verbose: 'false'
+  }
+  stage('Switch to new version') {
+    input "Switch Production?"
+
+    
+    sh 'oc patch route tasks -n george-kitchensink-prod -p \'{"spec":{"to":{"name":"' + dest + '"}}}\''
+    sh 'oc get route tasks -n george-kitchensink-prod > oc_out.txt'
+    oc_out = readFile('oc_out.txt')
+    echo "Current route configuration: " + oc_out
+  }
+}
+
+// Functions in order to read variables
+def getVersionFromPom(pom) {
+  def matcher = readFile(pom) =~ '<version>(.+)</version>'
+  matcher ? matcher[0][1] : null
+}
+def getGroupIdFromPom(pom) {
+  def matcher = readFile(pom) =~ '<groupId>(.+)</groupId>'
+  matcher ? matcher[0][1] : null
+}
+def getArtifactIdFromPom(pom) {
+  def matcher = readFile(pom) =~ '<artifactId>(.+)</artifactId>'
+  matcher ? matcher[0][1] : null
+}
+def String getBuildVersion(pom) {
+            return getVersionFromPom(pom).minus("-SNAPSHOT") + '.' +
+env.BUILD_NUMBER
+          }

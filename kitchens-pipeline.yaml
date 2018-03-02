@@ -1,0 +1,17 @@
+ApiVersion: v1
+items:
+- kind: "BuildConfig"
+  apiVersion: "v1"
+  metadata:
+    name: "kitchens-pipeline"
+  spec:
+    source:
+      type: "Git"
+      git:
+        uri: "http://gogs-george-gogs.apps.2245.openshift.opentlc.com/CICD-HOMEWORK/george-kitchensink"
+    strategy:
+      type: "JenkinsPipeline"
+      jenkinsPipelineStrategy:
+        jenkinsfilePath: jenkinsfile
+kind: List
+metadata: []

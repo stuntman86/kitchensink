@@ -1,0 +1,14 @@
+PostgreSQL db ( in development environment ) variables to set in OCP Application , that the DB pod runs in the same project
+
+
+
+DB_SERVICE_PREFIX_MAPPING  =   dev-postgresql=DB
+
+DB_USERNAME                = whatever we set when creating the db
+
+DB_PASSWORD                = = / =
+
+DB_JNDI                    = java:jboss/datasources/KitchensinkAngularJSQuickstartDS
+
+
+DB_DATABASE                = name we gave at creation time of db
